@@ -2,10 +2,11 @@ package provider
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 	"github.com/mrparkers/terraform-provider-keycloak/keycloak"
-	"strings"
 )
 
 func resourceKeycloakAuthenticationExecution() *schema.Resource {
@@ -76,26 +77,63 @@ func mapFromDataToAuthenticationExecution(data *schema.ResourceData) *keycloak.A
 	return authenticationExecution
 }
 
-func mapFromAuthenticationExecutionToData(data *schema.ResourceData, authenticationExecution *keycloak.AuthenticationExecution) {
-	data.SetId(authenticationExecution.Id)
+func mapFromDataToAuthenticationExecutionConfig(data *schema.ResourceData) *keycloak.AuthenticationExecutionConfig {
+	rawConfig, ok := data.GetOk("config")
+	if !ok {
+		return nil
+	}
 
-	data.Set("realm_id", authenticationExecution.RealmId)
-	data.Set("parent_flow_alias", authenticationExecution.ParentFlowAlias)
-	data.Set("authenticator", authenticationExecution.Authenticator)
-	data.Set("requirement", authenticationExecution.Requirement)
+	config := rawConfig.([]interface{})[0].(map[string]interface{})
+	configMap := make(map[string]string)
+
+	for k, v := range config["config"].(map[string]interface{}) {
+		configMap[k] = v.(string)
+	}
+
+	return &keycloak.AuthenticationExecutionConfig{
+		// Id:          rawConfig.(*schema.ResourceData).Id(),
+		RealmId:     data.Get("realm_id").(string),
+		ExecutionId: data.Id(),
+		Alias:       config["alias"].(string),
+		Config:      configMap,
+	}
+}
+
+func mapFromAuthenticationExecutionToData(data *schema.ResourceData, execution *keycloak.AuthenticationExecution, config *keycloak.AuthenticationExecutionConfig) {
+	data.SetId(execution.Id)
+
+	data.Set("realm_id", execution.RealmId)
+	data.Set("parent_flow_alias", execution.ParentFlowAlias)
+	data.Set("authenticator", execution.Authenticator)
+	data.Set("requirement", execution.Requirement)
+
+	if config == nil {
+		data.Set("config", nil)
+	} else {
+		configSettings := make(map[string]interface{})
+		configSettings["alias"] = config.Alias
+		configSettings["config"] = config.Config
+		data.Set("config", []interface{}{configSettings})
+	}
 }
 
 func resourceKeycloakAuthenticationExecutionCreate(data *schema.ResourceData, meta interface{}) error {
 	keycloakClient := meta.(*keycloak.KeycloakClient)
 
-	authenticationExecution := mapFromDataToAuthenticationExecution(data)
+	execution := mapFromDataToAuthenticationExecution(data)
+	config := mapFromDataToAuthenticationExecutionConfig(data)
 
-	err := keycloakClient.NewAuthenticationExecution(authenticationExecution)
-	if err != nil {
+	if err := keycloakClient.NewAuthenticationExecution(execution); err != nil {
 		return err
 	}
 
-	mapFromAuthenticationExecutionToData(data, authenticationExecution)
+	if config != nil {
+		if _, err := keycloakClient.NewAuthenticationExecutionConfig(config); err != nil {
+			return err
+		}
+	}
+
+	mapFromAuthenticationExecutionToData(data, execution, config)
 
 	return resourceKeycloakAuthenticationExecutionRead(data, meta)
 }
@@ -107,12 +145,26 @@ func resourceKeycloakAuthenticationExecutionRead(data *schema.ResourceData, meta
 	parentFlowAlias := data.Get("parent_flow_alias").(string)
 	id := data.Id()
 
-	authenticationExecution, err := keycloakClient.GetAuthenticationExecution(realmId, parentFlowAlias, id)
+	execution, err := keycloakClient.GetAuthenticationExecution(realmId, parentFlowAlias, id)
 	if err != nil {
 		return handleNotFoundError(err, data)
 	}
 
-	mapFromAuthenticationExecutionToData(data, authenticationExecution)
+	var config *keycloak.AuthenticationExecutionConfig
+	if execution.AuthenticationConfig != "" {
+		config = &keycloak.AuthenticationExecutionConfig{
+			RealmId:     data.Get("realm_id").(string),
+			ExecutionId: data.Get("execution_id").(string),
+			Id:          data.Id(),
+		}
+
+		err := keycloakClient.GetAuthenticationExecutionConfig(config)
+		if err != nil {
+			return handleNotFoundError(err, data)
+		}
+	}
+
+	mapFromAuthenticationExecutionToData(data, execution)
 
 	return nil
 }
